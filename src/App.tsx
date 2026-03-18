@@ -434,13 +434,31 @@ export default function App() {
     }
 
     let animId: number;
+    let frameCount = 0;
 
     const animate = () => {
+      frameCount++;
+
       // Semi-transparent overlay creates trailing fade.
       // Bright (close) chars take longer to fade = longer trails.
       // Dim (far) chars fade fast = short trails. Natural parallax.
       ctx.fillStyle = 'rgba(0, 0, 0, 0.014)';
       ctx.fillRect(0, 0, w, h);
+
+      // Every 120 frames (~2 seconds), clean up very dim pixels to prevent permanent ghosting
+      if (frameCount % 120 === 0) {
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        for (let i = 0; i < data.length; i += 4) {
+          // If pixel is very dim (green channel < 8), make it fully black
+          if (data[i + 1] < 8) {
+            data[i] = 0;     // R
+            data[i + 1] = 0; // G
+            data[i + 2] = 0; // B
+          }
+        }
+        ctx.putImageData(imageData, 0, 0);
+      }
 
       for (const col of columns) {
         col.y += col.speed;
