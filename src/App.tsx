@@ -50,24 +50,65 @@ interface RainColumn {
   speed: number;
   charIndex: number;
   greenValue: number;
+  driftPhase: number;
+  driftRate: number;
+  fallVariance: number;
+  generationVariance: number;
+  spacingVariance: number;
 }
 
-function createRainColumn(w: number, h: number, stagger: boolean): RainColumn {
+interface RainSettings {
+  density: number;
+  fallSpeed: number;
+  generationSpeed: number;
+  lineSpacing: number;
+  organicVariation: boolean;
+}
+
+const DEFAULT_RAIN_SETTINGS: RainSettings = {
+  density: 1,
+  fallSpeed: 1,
+  generationSpeed: 1,
+  lineSpacing: 1,
+  organicVariation: true,
+};
+
+function getRainColumnCount(width: number, density: number): number {
+  return Math.max(24, Math.floor((width / 14) * density));
+}
+
+function createRainColumn(x: number, h: number, stagger: boolean, settings: RainSettings): RainColumn {
   const fontSize = 10 + Math.random() * 24;
   const depthRatio = (fontSize - 10) / 24;
   const t = depthRatio * depthRatio;
   const greenValue = Math.floor(12 + t * 243);
-  const speed = 0.3 + t * 3;
+  const speed = (0.3 + t * 3) * settings.fallSpeed;
 
   return {
-    x: Math.floor(Math.random() * w),
+    x,
     y: stagger ? -(Math.random() * h * 2) : -(fontSize + Math.random() * 40),
     lastDrawY: -Infinity,
     fontSize,
     speed,
     charIndex: Math.floor(Math.random() * CORPUS.length),
     greenValue,
+    driftPhase: Math.random() * Math.PI * 2,
+    driftRate: 0.00045 + Math.random() * 0.00075,
+    fallVariance: 0.05 + Math.random() * 0.12,
+    generationVariance: 0.08 + Math.random() * 0.18,
+    spacingVariance: 0.04 + Math.random() * 0.12,
   };
+}
+
+function createRainColumns(w: number, h: number, settings: RainSettings): RainColumn[] {
+  const count = getRainColumnCount(w, settings.density);
+  const spacing = w / count;
+
+  return Array.from({ length: count }, (_, index) => {
+    const jitter = Math.max(2, spacing - 2);
+    const x = Math.min(w - 2, index * spacing + Math.random() * jitter);
+    return createRainColumn(x, h, true, settings);
+  });
 }
 
 const THEMES: Record<ThemeKey, ThemeConfig> = {
@@ -271,12 +312,16 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [themeKey, setThemeKey] = useState<ThemeKey>('matrix');
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [rainSettingsOpen, setRainSettingsOpen] = useState(false);
+  const [rainSettings, setRainSettings] = useState<RainSettings>(DEFAULT_RAIN_SETTINGS);
   const themeMenuRef = useRef<HTMLDivElement>(null);
+  const rainSettingsRef = useRef<HTMLDivElement>(null);
   const textRefs = useRef<(HTMLDivElement | null)[]>([]);
   const themeRef = useRef(THEMES[themeKey]);
   const rainCanvasRef = useRef<HTMLCanvasElement>(null);
 
   const theme = THEMES[themeKey];
+  const isRainMode = theme.renderMode === 'rain';
 
   const RWKV_INDICES = new Set([
     // R
@@ -350,10 +395,20 @@ export default function App() {
       if (themeMenuRef.current && !themeMenuRef.current.contains(e.target as Node)) {
         setThemeMenuOpen(false);
       }
+
+      if (rainSettingsRef.current && !rainSettingsRef.current.contains(e.target as Node)) {
+        setRainSettingsOpen(false);
+      }
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
+
+  useEffect(() => {
+    if (!isRainMode) {
+      setRainSettingsOpen(false);
+    }
+  }, [isRainMode]);
 
   // Grid animation
   useEffect(() => {
@@ -427,16 +482,15 @@ export default function App() {
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, w, h);
 
-    const numColumns = Math.max(100, Math.floor(w / 8));
-    const columns: RainColumn[] = [];
-    for (let i = 0; i < numColumns; i++) {
-      columns.push(createRainColumn(w, h, true));
-    }
+    const columns = createRainColumns(w, h, rainSettings);
 
     let animId: number;
     let frameCount = 0;
+    let lastFrameTime = performance.now();
 
-    const animate = () => {
+    const animate = (time: number) => {
+      const deltaTime = Math.min(40, time - lastFrameTime || 16.67);
+      lastFrameTime = time;
       frameCount++;
 
       // Semi-transparent overlay creates trailing fade.
@@ -461,9 +515,30 @@ export default function App() {
       }
 
       for (const col of columns) {
-        col.y += col.speed;
+        const driftWave = rainSettings.organicVariation
+          ? Math.sin(time * col.driftRate + col.driftPhase)
+          : 0;
+        const spacingWave = rainSettings.organicVariation
+          ? Math.cos(time * col.driftRate * 0.72 + col.driftPhase * 1.31)
+          : 0;
+        const effectiveFallSpeed = col.speed * (1 + driftWave * col.fallVariance);
+        const effectiveGenerationSpeed = Math.max(
+          0.35,
+          rainSettings.generationSpeed * (1 + driftWave * col.generationVariance),
+        );
+        const effectiveLineSpacing = Math.max(
+          0.35,
+          rainSettings.lineSpacing * (1 + spacingWave * col.spacingVariance),
+        );
 
-        if (col.y - col.lastDrawY >= col.fontSize) {
+        col.y += (effectiveFallSpeed * deltaTime) / 16.67;
+
+        const glyphStep = Math.max(
+          2,
+          (col.fontSize * effectiveLineSpacing) / effectiveGenerationSpeed,
+        );
+
+        if (col.y - col.lastDrawY >= glyphStep) {
           col.lastDrawY = col.y;
           col.charIndex = (col.charIndex + 1) % CORPUS.length;
 
@@ -484,14 +559,14 @@ export default function App() {
         }
 
         if (col.y > h + 80) {
-          Object.assign(col, createRainColumn(w, h, false));
+          Object.assign(col, createRainColumn(Math.floor(Math.random() * w), h, false, rainSettings));
         }
       }
 
       animId = requestAnimationFrame(animate);
     };
 
-    animate();
+    animId = requestAnimationFrame(animate);
 
     const onResize = () => {
       const nw = canvas.clientWidth;
@@ -503,6 +578,7 @@ export default function App() {
       ctx.setTransform(ndpr, 0, 0, ndpr, 0, 0);
       ctx.fillStyle = '#000000';
       ctx.fillRect(0, 0, nw, nh);
+      columns.splice(0, columns.length, ...createRainColumns(nw, nh, rainSettings));
     };
     window.addEventListener('resize', onResize);
 
@@ -510,7 +586,22 @@ export default function App() {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', onResize);
     };
-  }, [isRunning, themeKey]);
+  }, [isRunning, themeKey, rainSettings]);
+
+  const updateRainSetting = useCallback(
+    (key: keyof RainSettings, value: number) => {
+      setRainSettings((current) => ({
+        ...current,
+        [key]: value,
+      }));
+    },
+    [],
+  );
+
+  const estimatedRainColumns = getRainColumnCount(
+    rainCanvasRef.current?.clientWidth || window.innerWidth,
+    rainSettings.density,
+  );
 
   return (
     <div
@@ -553,7 +644,7 @@ export default function App() {
           </p>
         </div>
 
-        <div className="flex items-center space-x-8">
+        <div className="flex items-center space-x-4 md:space-x-8">
           <div className="hidden md:flex items-center space-x-6 text-[13px] font-bold uppercase" style={{ letterSpacing: theme.headerLetterSpacing }}>
             {[
               { label: 'Hardware', value: 'RTX_4090' },
@@ -656,6 +747,190 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {isRainMode && (
+            <div className="relative" ref={rainSettingsRef}>
+              <button
+                onClick={() => setRainSettingsOpen(!rainSettingsOpen)}
+                className="flex items-center gap-2 px-3 py-1.5 text-[12px] font-bold uppercase transition-all duration-150 border"
+                style={{
+                  borderColor: `${theme.primary}50`,
+                  color: theme.primary,
+                  backgroundColor: rainSettingsOpen ? `${theme.primary}1a` : `${theme.primary}0d`,
+                  letterSpacing: theme.headerLetterSpacing,
+                  boxShadow: rainSettingsOpen ? `0 0 14px ${theme.primary}33` : 'none',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = `${theme.primary}1a`;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = rainSettingsOpen ? `${theme.primary}1a` : `${theme.primary}0d`;
+                }}
+              >
+                <span>RAIN_SETTINGS</span>
+                <span className="text-[10px]">{rainSettingsOpen ? '▴' : '▾'}</span>
+              </button>
+
+              {rainSettingsOpen && (
+                <div
+                  className="absolute right-0 top-full mt-1 w-80 border p-4"
+                  style={{
+                    zIndex: 100,
+                    backgroundColor: `${theme.bg}f2`,
+                    borderColor: `${theme.primary}40`,
+                    boxShadow: `0 8px 32px rgba(0,0,0,0.8), 0 0 1px ${theme.primary}40`,
+                    backdropFilter: 'blur(8px)',
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-4 mb-4">
+                    <div>
+                      <div
+                        className="text-[12px] font-bold uppercase"
+                        style={{ letterSpacing: theme.headerLetterSpacing, color: theme.primary }}
+                      >
+                        Digital Rain Config
+                      </div>
+                      <div className="text-[10px] mt-1" style={{ color: `${theme.primary}99` }}>
+                        当前约 {estimatedRainColumns} 列字符雨
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setRainSettings(DEFAULT_RAIN_SETTINGS)}
+                      className="px-2 py-1 text-[10px] font-bold uppercase border transition-colors duration-150"
+                      style={{
+                        borderColor: `${theme.primary}40`,
+                        color: theme.primary,
+                        letterSpacing: theme.headerLetterSpacing,
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = `${theme.primary}14`;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = 'transparent';
+                      }}
+                    >
+                      Reset
+                    </button>
+                  </div>
+
+                  <div
+                    className="mb-4 flex items-center justify-between gap-4 border px-3 py-3"
+                    style={{
+                      borderColor: `${theme.primary}30`,
+                      backgroundColor: `${theme.primary}08`,
+                    }}
+                  >
+                    <div>
+                      <div className="text-[12px] font-bold" style={{ color: theme.primary }}>
+                        随机波动
+                      </div>
+                      <div className="text-[10px]" style={{ color: `${theme.primary}80` }}>
+                        让每列的下落速度、生成节奏和字距轻微起伏
+                      </div>
+                    </div>
+                    <button
+                      onClick={() =>
+                        setRainSettings((current) => ({
+                          ...current,
+                          organicVariation: !current.organicVariation,
+                        }))
+                      }
+                      className="min-w-16 px-3 py-1.5 text-[10px] font-bold uppercase border transition-colors duration-150"
+                      style={{
+                        borderColor: `${theme.primary}40`,
+                        color: rainSettings.organicVariation ? theme.bg : theme.primary,
+                        backgroundColor: rainSettings.organicVariation ? theme.primary : 'transparent',
+                        letterSpacing: theme.headerLetterSpacing,
+                        boxShadow: rainSettings.organicVariation ? `0 0 12px ${theme.primary}33` : 'none',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!rainSettings.organicVariation) {
+                          e.currentTarget.style.backgroundColor = `${theme.primary}14`;
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = rainSettings.organicVariation ? theme.primary : 'transparent';
+                      }}
+                    >
+                      {rainSettings.organicVariation ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+
+                  {[
+                    {
+                      key: 'density' as const,
+                      label: '文字密度',
+                      hint: '控制同时下落的列数',
+                      min: 0.4,
+                      max: 2.4,
+                      step: 0.1,
+                      value: `${estimatedRainColumns} 列`,
+                    },
+                    {
+                      key: 'fallSpeed' as const,
+                      label: '下落速度',
+                      hint: '控制字符雨整体下降速度',
+                      min: 0.4,
+                      max: 3,
+                      step: 0.1,
+                      value: `${rainSettings.fallSpeed.toFixed(1)}x`,
+                    },
+                    {
+                      key: 'generationSpeed' as const,
+                      label: '文字生成速度',
+                      hint: '控制新字符出现的频率',
+                      min: 0.5,
+                      max: 3,
+                      step: 0.1,
+                      value: `${rainSettings.generationSpeed.toFixed(1)}x`,
+                    },
+                    {
+                      key: 'lineSpacing' as const,
+                      label: '纵向间距',
+                      hint: '控制同一列字符之间的上下距离',
+                      min: 0.5,
+                      max: 3,
+                      step: 0.1,
+                      value: `${rainSettings.lineSpacing.toFixed(1)}x`,
+                    },
+                  ].map((control) => (
+                    <label key={control.key} className="block mb-4 last:mb-0">
+                      <div className="flex items-center justify-between gap-4 mb-1.5">
+                        <div>
+                          <div className="text-[12px] font-bold" style={{ color: theme.primary }}>
+                            {control.label}
+                          </div>
+                          <div className="text-[10px]" style={{ color: `${theme.primary}80` }}>
+                            {control.hint}
+                          </div>
+                        </div>
+                        <div
+                          className="text-[10px] px-2 py-1 border min-w-16 text-center"
+                          style={{
+                            borderColor: `${theme.primary}30`,
+                            color: theme.primary,
+                            backgroundColor: `${theme.primary}0d`,
+                          }}
+                        >
+                          {control.value}
+                        </div>
+                      </div>
+                      <input
+                        type="range"
+                        min={control.min}
+                        max={control.max}
+                        step={control.step}
+                        value={rainSettings[control.key]}
+                        onChange={(e) => updateRainSetting(control.key, Number(e.target.value))}
+                        className="w-full accent-green-500"
+                        style={{ accentColor: theme.primary }}
+                      />
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <button
             onClick={() => setIsRunning(!isRunning)}
